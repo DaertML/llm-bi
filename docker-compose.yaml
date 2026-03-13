@@ -1,0 +1,144 @@
+version: "3.9"
+ 
+networks:
+  llm-data-net:
+    driver: bridge
+ 
+volumes:
+  postgres_data:
+  minio_data:
+  open_webui_data:
+ 
+services:
+ 
+  # ─── Object Storage ─────────────────────────────────────────────────────────
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: minio
+    restart: unless-stopped
+    networks: [llm-data-net]
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    volumes:
+      - minio_data:/data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+ 
+  # Bootstrap: create default buckets & upload sample data
+  minio-init:
+    image: quay.io/minio/mc:latest
+    container_name: minio-init
+    networks: [llm-data-net]
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./sample-data:/sample-data:ro
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin &&
+        mc mb -p local/sales-data &&
+        mc mb -p local/hr-data &&
+        mc mb -p local/inventory-data &&
+        #mc cp /sample-data/sales.csv       local/sales-data/sales.csv &&
+        #mc cp /sample-data/employees.csv   local/hr-data/employees.csv &&
+        #mc cp /sample-data/products.csv    local/inventory-data/products.csv &&
+        
+        echo 'MinIO initialised.'
+      "
+ 
+  # ─── Relational DB (data catalog) ────────────────────────────────────────────
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    restart: unless-stopped
+    networks: [llm-data-net]
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts/init-catalog.sql:/docker-entrypoint-initdb.d/01-init-catalog.sql:ro
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: datacatalog
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d datacatalog"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+ 
+  # ─── Indexer (Python) ────────────────────────────────────────────────────────
+  indexer:
+    build:
+      context: ./indexer
+      dockerfile: Dockerfile
+    container_name: indexer
+    restart: unless-stopped
+    networks: [llm-data-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      POSTGRES_DSN: postgresql://admin:admin@postgres:5432/datacatalog
+      SCAN_INTERVAL_SECONDS: 30
+ 
+  # ─── Agent (Python – OpenAI-compatible HTTP server) ─────────────────────────
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: agent
+    restart: unless-stopped
+    # network_mode: host lets the agent reach Ollama on 127.0.0.1:11434
+    # (Ollama binds to localhost on the host, not reachable via bridge network)
+    network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+      indexer:
+        condition: service_started
+    environment:
+      # With host networking, other containers are reached via localhost
+      MINIO_ENDPOINT: localhost:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      POSTGRES_DSN: postgresql://admin:admin@localhost:5432/datacatalog
+      OLLAMA_HOST: http://127.0.0.1:11434
+      OLLAMA_MODEL: qwen3:8b
+ 
+  # ─── Open WebUI ──────────────────────────────────────────────────────────────
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    networks: [llm-data-net]
+    ports:
+      - "3000:8080"
+    volumes:
+      - open_webui_data:/app/backend/data
+    depends_on:
+      - agent
+    # agent uses host networking, so reach it via the host gateway IP
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # agent is on host network → reachable via host-gateway
+      OPENAI_API_BASE_URL: http://host.docker.internal:8000/v1
+      OPENAI_API_KEY: "not-needed"
+      # Disable built-in Ollama so users interact via agent only
+      ENABLE_OLLAMA_API: "false"
+      WEBUI_AUTH: "false"
