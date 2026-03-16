@@ -3,6 +3,8 @@ Business Intelligence and Data Querying that uses natural language processing wi
 
 ![alt text](diagrama_llm_bi.png)
 
+The text2sql is performed by the agent with the information it gets from the data catalog and the user natural language query
+
 # Introduction
 Just running "docker-compose up" should make it; then add the data to the buckets. If you want to do it properly, customize the docker-compose Minio's commands to create the buckets that you need and copy the data from there, or do it with the Web UI.
 
