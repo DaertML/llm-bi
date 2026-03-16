@@ -1,6 +1,8 @@
 # llm-bi
 Business Intelligence and Data Querying that uses natural language processing with LLMs, so that you can forget about SQL
 
+![alt text](diagrama_llm_bi.png)
+
 # Introduction
 Just running "docker-compose up" should make it; then add the data to the buckets. If you want to do it properly, customize the docker-compose Minio's commands to create the buckets that you need and copy the data from there, or do it with the Web UI.
 
